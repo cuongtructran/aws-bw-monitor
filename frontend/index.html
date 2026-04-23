@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>AWS Bandwidth Monitor</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <link rel="stylesheet" href="/static/style.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+</head>
+<body>
+  <header>
+    <h1>AWS Bandwidth Monitor</h1>
+    <p class="subtitle">Per-listener bandwidth from ALB / NLB access logs</p>
+  </header>
+
+  <main>
+    <section class="controls">
+      <div class="row">
+        <label>Profile
+          <select id="profile"></select>
+        </label>
+        <label>Region
+          <select id="region"></select>
+        </label>
+        <button id="load-lbs">Load LBs</button>
+      </div>
+
+      <div class="row">
+        <label>Load Balancer
+          <select id="lb"></select>
+        </label>
+        <span id="lb-status" class="badge"></span>
+      </div>
+
+      <div class="row">
+        <fieldset id="listeners-box">
+          <legend>
+            Listeners
+            <span class="legend-actions">
+              <button type="button" class="link-btn" id="listeners-all">all</button>
+              <span class="sep">·</span>
+              <button type="button" class="link-btn" id="listeners-none">none</button>
+            </span>
+          </legend>
+          <div id="listeners"></div>
+        </fieldset>
+      </div>
+
+      <div class="row">
+        <label>Timeframe
+          <select id="timeframe">
+            <option value="5m">Last 5 minutes</option>
+            <option value="1h" selected>Last hour</option>
+            <option value="1d">Last day</option>
+            <option value="1w">Last week</option>
+            <option value="1mo">Last 30 days</option>
+          </select>
+        </label>
+        <label>Timezone
+          <select id="timezone">
+            <option value="utc" selected>UTC</option>
+            <option value="local">Local</option>
+            <option value="ny">New York</option>
+          </select>
+        </label>
+        <button id="run">Fetch bandwidth</button>
+        <span id="progress"></span>
+      </div>
+    </section>
+
+    <section class="chart-box">
+      <canvas id="chart"></canvas>
+    </section>
+
+    <section id="error" class="error" hidden></section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
