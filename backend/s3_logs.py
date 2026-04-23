@@ -9,7 +9,7 @@ import shlex
 import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Iterable
 from urllib.parse import urlparse
@@ -105,9 +105,16 @@ def _parse_iso8601(ts: str) -> int | None:
         return None
 
 
-def parse_alb_lines(lines: Iterable[str]) -> dict[tuple[int, int], tuple[int, int]]:
+@dataclass
+class ParseResult:
+    bw: dict[tuple[int, int], tuple[int, int]]  # (port, minute_ts) → (bytes, requests)
+    client_bw: dict[tuple[str, int, int], tuple[int, int]]  # (client_ip, port, minute_ts) → (bytes, requests)
+
+
+def parse_alb_lines(lines: Iterable[str]) -> ParseResult:
     """Aggregate ALB log lines by (listener_port, minute_ts) → (bytes, requests)."""
     agg: dict[tuple[int, int], list[int]] = defaultdict(lambda: [0, 0])
+    client_agg: dict[tuple[str, int, int], list[int]] = defaultdict(lambda: [0, 0])
     for line in lines:
         line = line.strip()
         if not line:
@@ -135,13 +142,22 @@ def parse_alb_lines(lines: Iterable[str]) -> dict[tuple[int, int], tuple[int, in
         if port is None:
             continue
         minute = ts_s - (ts_s % 60)
+        total = received + sent
         key = (port, minute)
-        agg[key][0] += received + sent
+        agg[key][0] += total
         agg[key][1] += 1
-    return {k: (v[0], v[1]) for k, v in agg.items()}
+        # ALB field 3 is "client:port"
+        client_ip = fields[3].rsplit(":", 1)[0] if ":" in fields[3] else fields[3]
+        ckey = (client_ip, port, minute)
+        client_agg[ckey][0] += total
+        client_agg[ckey][1] += 1
+    return ParseResult(
+        bw={k: (v[0], v[1]) for k, v in agg.items()},
+        client_bw={k: (v[0], v[1]) for k, v in client_agg.items()},
+    )
 
 
-def parse_nlb_lines(lines: Iterable[str]) -> dict[tuple[int, int], tuple[int, int]]:
+def parse_nlb_lines(lines: Iterable[str]) -> ParseResult:
     """Aggregate NLB-TLS log lines by (listener_port, minute_ts) → (bytes, requests).
 
     NLB TLS format (positional):
@@ -151,6 +167,7 @@ def parse_nlb_lines(lines: Iterable[str]) -> dict[tuple[int, int], tuple[int, in
       9 received_bytes  10 sent_bytes  ...
     """
     agg: dict[tuple[int, int], list[int]] = defaultdict(lambda: [0, 0])
+    client_agg: dict[tuple[str, int, int], list[int]] = defaultdict(lambda: [0, 0])
     for line in lines:
         line = line.strip()
         if not line:
@@ -174,17 +191,26 @@ def parse_nlb_lines(lines: Iterable[str]) -> dict[tuple[int, int], tuple[int, in
         except ValueError:
             continue
         minute = ts_s - (ts_s % 60)
+        total = received + sent
         key = (port, minute)
-        agg[key][0] += received + sent
+        agg[key][0] += total
         agg[key][1] += 1
-    return {k: (v[0], v[1]) for k, v in agg.items()}
+        # NLB field 5 is "client:port"
+        client_ip = fields[5].rsplit(":", 1)[0] if ":" in fields[5] else fields[5]
+        ckey = (client_ip, port, minute)
+        client_agg[ckey][0] += total
+        client_agg[ckey][1] += 1
+    return ParseResult(
+        bw={k: (v[0], v[1]) for k, v in agg.items()},
+        client_bw={k: (v[0], v[1]) for k, v in client_agg.items()},
+    )
 
 
 def _download_and_parse(
     s3,
     f: S3LogFile,
     lb_type: str,
-) -> dict[tuple[int, int], tuple[int, int]]:
+) -> ParseResult:
     body = s3.get_object(Bucket=f.bucket, Key=f.key)["Body"].read()
     with gzip.GzipFile(fileobj=io.BytesIO(body)) as gz:
         text = io.TextIOWrapper(gz, encoding="utf-8", errors="replace")
@@ -222,8 +248,8 @@ def ingest_logs(
     done_count = 0
 
     def work(f: S3LogFile):
-        rows = _download_and_parse(s3, f, lb_type)
-        cache.insert_aggregates(lb_arn, rows, f.bucket, f.key, int(time.time()))
+        result = _download_and_parse(s3, f, lb_type)
+        cache.insert_aggregates(lb_arn, result.bw, result.client_bw, f.bucket, f.key, int(time.time()))
         return f
 
     # Modest concurrency — S3 reads are I/O bound.

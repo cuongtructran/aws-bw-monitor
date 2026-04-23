@@ -89,6 +89,20 @@ class BandwidthResponse(BaseModel):
     cache_only: bool
 
 
+class ClientTrafficEntry(BaseModel):
+    client_ip: str
+    port: int
+    bytes: int
+    requests: int
+
+
+class TopClientsResponse(BaseModel):
+    timeframe: str
+    start_ts: int
+    end_ts: int
+    clients: list[ClientTrafficEntry]
+
+
 # ----- endpoints -----
 
 
@@ -229,6 +243,34 @@ def post_bandwidth(req: BandwidthRequest) -> BandwidthResponse:
         series=series,
         ingested_files=ingested,
         cache_only=cache_only,
+    )
+
+
+@app.post("/api/top_clients")
+def post_top_clients(req: BandwidthRequest) -> TopClientsResponse:
+    if req.timeframe not in TIMEFRAMES:
+        raise HTTPException(status_code=400, detail=f"unknown timeframe {req.timeframe}")
+    range_s, _, _ = TIMEFRAMES[req.timeframe]
+
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(seconds=range_s)
+    start_ts = int(start.timestamp())
+    end_ts = int(end.timestamp())
+
+    rows = cache.query_top_clients(
+        lb_arn=req.lb_arn,
+        ports=req.listener_ports,
+        start_ts=start_ts,
+        end_ts=end_ts,
+    )
+    return TopClientsResponse(
+        timeframe=req.timeframe,
+        start_ts=start_ts,
+        end_ts=end_ts,
+        clients=[
+            ClientTrafficEntry(client_ip=ip, port=port, bytes=b, requests=r)
+            for ip, port, b, r in rows
+        ],
     )
 
 

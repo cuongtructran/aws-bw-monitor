@@ -35,6 +35,17 @@ def init_db() -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_bw_ts ON bw_minute(lb_arn, minute_ts);
 
+        CREATE TABLE IF NOT EXISTS client_traffic (
+            lb_arn TEXT NOT NULL,
+            client_ip TEXT NOT NULL,
+            listener_port INTEGER NOT NULL,
+            minute_ts INTEGER NOT NULL,
+            bytes INTEGER NOT NULL,
+            requests INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (lb_arn, client_ip, listener_port, minute_ts)
+        );
+        CREATE INDEX IF NOT EXISTS idx_client_ts ON client_traffic(lb_arn, minute_ts);
+
         CREATE TABLE IF NOT EXISTS parsed_files (
             s3_bucket TEXT NOT NULL,
             s3_key TEXT NOT NULL,
@@ -56,6 +67,7 @@ def is_parsed(bucket: str, key: str) -> bool:
 def insert_aggregates(
     lb_arn: str,
     rows: dict[tuple[int, int], tuple[int, int]],
+    client_rows: dict[tuple[str, int, int], tuple[int, int]],
     s3_bucket: str,
     s3_key: str,
     parsed_at: int,
@@ -63,6 +75,7 @@ def insert_aggregates(
     """Atomically upsert per-(port, minute) aggregates and mark file parsed.
 
     rows: { (listener_port, minute_ts): (bytes_sum, request_count) }
+    client_rows: { (client_ip, listener_port, minute_ts): (bytes_sum, request_count) }
     """
     with _lock, closing(_conn()) as c:
         c.execute("BEGIN")
@@ -78,6 +91,19 @@ def insert_aggregates(
                 [
                     (lb_arn, port, ts, b, r)
                     for (port, ts), (b, r) in rows.items()
+                ],
+            )
+            c.executemany(
+                """
+                INSERT INTO client_traffic (lb_arn, client_ip, listener_port, minute_ts, bytes, requests)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(lb_arn, client_ip, listener_port, minute_ts)
+                DO UPDATE SET bytes = bytes + excluded.bytes,
+                              requests = requests + excluded.requests
+                """,
+                [
+                    (lb_arn, ip, port, ts, b, r)
+                    for (ip, port, ts), (b, r) in client_rows.items()
                 ],
             )
             c.execute(
@@ -125,3 +151,37 @@ def query_series(
         for port, ts, bytes_sum, req_sum in cur:
             out[port].append((int(ts), int(bytes_sum or 0), int(req_sum or 0)))
         return out
+
+
+def query_top_clients(
+    lb_arn: str,
+    ports: list[int],
+    start_ts: int,
+    end_ts: int,
+    limit: int = 50,
+) -> list[tuple[str, int, int, int]]:
+    """Return top clients by total bytes across the given ports and time range.
+
+    Returns list of (client_ip, listener_port, total_bytes, total_requests)
+    ordered by total_bytes descending.
+    """
+    if not ports:
+        return []
+    placeholders = ",".join("?" for _ in ports)
+    sql = f"""
+        SELECT client_ip, listener_port, SUM(bytes), SUM(requests)
+          FROM client_traffic
+         WHERE lb_arn = ?
+           AND listener_port IN ({placeholders})
+           AND minute_ts >= ?
+           AND minute_ts <  ?
+         GROUP BY client_ip, listener_port
+         ORDER BY SUM(bytes) DESC
+         LIMIT ?
+    """
+    with _lock, closing(_conn()) as c:
+        cur = c.execute(
+            sql,
+            (lb_arn, *ports, start_ts, end_ts, limit),
+        )
+        return [(ip, int(port), int(b or 0), int(r or 0)) for ip, port, b, r in cur]
